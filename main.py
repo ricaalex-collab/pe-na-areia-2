@@ -1,91 +1,102 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
 from pypdf import PdfReader
 import re
+import os
 
-# Configuração da página
-st.set_page_config(page_title="Painel do Administrador", layout="wide")
+# Configurações de exibição
+st.set_page_config(page_title="Painel Penaareia", layout="wide")
 
-# LOGIN SIMPLES
+# 1. GERENCIAMENTO DE ARQUIVO DE DADOS
+ARQUIVO_DADOS = "membros_v1.csv"
+
+def carregar_dados():
+    if os.path.exists(ARQUIVO_DADOS):
+        return pd.read_csv(ARQUIVO_DADOS, dtype={'ID': str})
+    else:
+        # Criar dados iniciais baseados no seu print
+        data = {
+            'Nome': ['Alemão e Pri', 'Alexandre e Vanessa', 'André e Denise', 'Cabeção', 'Cacá e Karina', 'Campana', 'Caxias e Van'],
+            'ID': ['00', '06', '02', '12', '01', '11', '04'],
+            'Saldo': [-120.0, -120.0, -180.0, 90.0, -180.0, -190.0, -240.0],
+            'Taxa Mensal': [60.0, 60.0, 60.0, 30.0, 60.0, 30.0, 60.0]
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(ARQUIVO_DADOS, index=False)
+        return df
+
+def salvar_dados(df):
+    df.to_csv(ARQUIVO_DADOS, index=False)
+
+# 2. SISTEMA DE LOGIN
 if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
 if not st.session_state.autenticado:
-    senha = st.text_input("Digite a senha do painel:", type="password")
+    st.title("Acesso ao Painel")
+    senha = st.text_input("Palavra-passe:", type="password")
     if st.button("Entrar"):
-        if senha == "SUA_SENHA_AQUI": # Defina sua senha aqui
+        if senha == "12345": # Altere aqui sua senha
             st.session_state.autenticado = True
             st.rerun()
         else:
-            st.error("Senha incorreta.")
+            st.error("Senha incorreta")
     st.stop()
 
-# CONEXÃO COM GOOGLE SHEETS
-conn = st.connection("gsheets", type=GSheetsConnection)
+# 3. INTERFACE PRINCIPAL
+st.title("Painel do Administrador - Grupo")
+df_membros = carregar_dados()
 
-def processar_pdf_caixa(file):
-    reader = PdfReader(file)
-    texto = ""
-    for page in reader.pages:
-        texto += page.extract_text()
-    
-    # Busca padrão: Nome do Favorecido seguido de Valor com "C" (Crédito)
-    # Ex: Alexandre Leoni Gu ... 60,06 C
-    padrao = r"(.*?)\n[\d\.\*]*\n\n\n([\d\.,]+)\sC"
-    matches = re.findall(padrao, texto)
-    
-    resultados = []
-    for nome, valor_str in matches:
-        if "PIX RECEBIDO" in texto: # Garante que estamos pegando entradas
-            valor_limpo = valor_str.replace('.', '').replace(',', '.')
-            valor_float = float(valor_limpo)
+# Cards Superiores
+col1, col2 = st.columns(2)
+col1.metric("Saldo Total do Grupo", f"R$ {df_membros['Saldo'].sum():.2f}")
+col2.metric("Membros Ativos", len(df_membros))
+
+# 4. PROCESSAMENTO DO PDF (Lógica baseada no seu extrato da CAIXA)
+st.divider()
+st.subheader("Atualizar via Extrato PDF")
+arquivo_pdf = st.file_uploader("Upload do extrato CAIXA", type="pdf")
+
+if arquivo_pdf:
+    if st.button("Processar e Salvar"):
+        reader = PdfReader(arquivo_pdf)
+        texto = ""
+        for page in reader.pages:
+            texto += page.extract_text()
+        
+        # Procura por "PIX RECEBIDO", o nome do favorecido e o valor
+        # O padrão abaixo identifica o valor e os centavos (ID)
+        padrao_pix = r"PIX RECEBIDO\n(.*?)\n.*?\n([\d\.,]+)\sC"
+        matches = re.findall(padrao_pix, texto)
+        
+        if matches:
+            sucessos = 0
+            for nome_pix, valor_str in matches:
+                valor_float = float(valor_str.replace('.', '').replace(',', '.'))
+                # Identifica ID pelos centavos (ex: 60,06 -> ID 06)
+                centavos = int(round((valor_float - int(valor_float)) * 100))
+                id_encontrado = str(centavos).zfill(2)
+                
+                # Atualiza no DataFrame
+                if id_encontrado in df_membros['ID'].values:
+                    idx = df_membros.index[df_membros['ID'] == id_encontrado][0]
+                    valor_principal = int(valor_float)
+                    df_membros.at[idx, 'Saldo'] += valor_principal
+                    st.success(f"Pagamento de R$ {valor_principal} creditado para: {df_membros.at[idx, 'Nome']}")
+                    sucessos += 1
             
-            # Pega apenas os centavos como ID
-            centavos = int(round((valor_float - int(valor_float)) * 100))
-            id_id = str(centavos).zfill(2)
-            
-            resultados.append({
-                "Nome": nome.strip(),
-                "Valor_Total": valor_float,
-                "Valor_Base": int(valor_float),
-                "ID_Identificado": id_id
-            })
-    return resultados
-
-# INTERFACE
-st.title("📊 Gestão de Pagamentos - Penaareia")
-
-# Lendo dados da aba "Membros"
-df_membros = conn.read(worksheet="Membros")
-
-# Exibição do Saldo Total
-saldo_total = df_membros['Saldo'].sum()
-st.metric("Saldo Total em Conta", f"R$ {saldo_total:,.2f}")
-
-# UPLOAD E PROCESSAMENTO
-st.subheader("Upload de Extrato (PDF CAIXA)")
-arquivo = st.file_uploader("Selecione o arquivo", type="pdf")
-
-if arquivo and st.button("Processar Pagamentos"):
-    pagamentos = processar_pdf_caixa(arquivo)
-    
-    for p in pagamentos:
-        id_pg = p['ID_Identificado']
-        if id_pg in df_membros['ID'].astype(str).values:
-            idx = df_membros.index[df_membros['ID'].astype(str) == id_pg][0]
-            nome_membro = df_membros.at[idx, 'Nome']
-            
-            # Atualiza Saldo
-            df_membros.at[idx, 'Saldo'] += p['Valor_Base']
-            st.success(f"✅ Pagamento identificado: {nome_membro} (ID {id_pg}) - R$ {p['Valor_Base']}")
+            if sucessos > 0:
+                salvar_dados(df_membros)
+                st.info("Todos os saldos foram atualizados e salvos!")
         else:
-            st.warning(f"⚠️ ID {id_pg} encontrado no extrato mas não cadastrado na planilha.")
+            st.warning("Nenhum pagamento PIX com o padrão de centavos/ID foi encontrado no PDF.")
 
-    # SALVAR NA PLANILHA
-    conn.update(worksheet="Membros", data=df_membros)
-    st.info("Planilha atualizada com sucesso!")
-
+# 5. TABELA DE MEMBROS
 st.divider()
 st.subheader("Lista de Membros")
-st.dataframe(df_membros, use_container_width=True)
+# Permite edição manual direto na tabela se necessário
+df_editado = st.data_editor(df_membros, num_rows="dynamic", use_container_width=True)
+
+if st.button("Salvar Alterações Manuais"):
+    salvar_dados(df_editado)
+    st.success("Dados salvos com sucesso!")
