@@ -4,80 +4,76 @@ from pypdf import PdfReader
 import re
 import os
 
-st.set_page_config(page_title="Penaareia - Admin", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Penaareia Admin", layout="wide")
 
-# --- BANCO DE DADOS LOCAL ---
-ARQUIVO_DADOS = "dados_membros.csv"
+# Gerenciamento de Dados local (Arquivo CSV no GitHub)
+ARQUIVO = "membros.csv"
 
-def inicializar_dados():
-    if not os.path.exists(ARQUIVO_DADOS):
-        # Criando a lista baseada no seu print inicial
-        dados = {
+def carregar_dados():
+    if not os.path.exists(ARQUIVO):
+        # Dados iniciais baseados no seu print
+        df = pd.DataFrame({
             'ID': ['00', '06', '02', '12', '01', '11', '04'],
             'Nome': ['Alemão e Pri', 'Alexandre e Vanessa', 'André e Denise', 'Cabeção', 'Cacá e Karina', 'Campana', 'Caxias e Van'],
             'Saldo': [-120.0, -120.0, -180.0, 90.0, -180.0, -190.0, -240.0],
-            'Taxa': [60.0, 60.0, 60.0, 30.0, 60.0, 30.0, 60.0]
-        }
-        pd.DataFrame(dados).to_csv(ARQUIVO_DADOS, index=False)
+            'Mensalidade': [60.0, 60.0, 60.0, 30.0, 60.0, 30.0, 60.0]
+        })
+        df.to_csv(ARQUIVO, index=False)
+    return pd.read_csv(ARQUIVO, dtype={'ID': str})
 
-inicializar_dados()
-df_membros = pd.read_csv(ARQUIVO_DADOS, dtype={'ID': str})
+# Login simplificado
+if 'auth' not in st.session_state:
+    st.session_state.auth = False
 
-# --- LOGIN ---
-if 'logado' not in st.session_state:
-    st.session_state.logado = False
-
-if not st.session_state.logado:
-    senha = st.text_input("Senha de Administrador", type="password")
-    if st.button("Acessar"):
-        if senha == "admin123": # Mude sua senha aqui
-            st.session_state.logado = True
+if not st.session_state.auth:
+    senha = st.text_input("Senha:", type="password")
+    if st.button("Entrar"):
+        if senha == "123": # Mude sua senha aqui
+            st.session_state.auth = True
             st.rerun()
     st.stop()
 
-# --- INTERFACE ---
+df = carregar_dados()
+
 st.title("Painel do Administrador")
 
-# Upload e Processamento
-with st.expander("⬆️ Upload de Extrato PDF", expanded=True):
-    arquivo = st.file_uploader("Arraste o extrato da Caixa aqui", type="pdf")
-    if arquivo and st.button("Processar Pagamentos"):
-        reader = PdfReader(arquivo)
-        texto_completo = ""
+# --- LÓGICA DE UPLOAD ---
+with st.expander("Subir Extrato PDF"):
+    pdf = st.file_uploader("Arraste aqui", type="pdf")
+    if pdf and st.button("Processar"):
+        reader = PdfReader(pdf)
+        texto = ""
         for page in reader.pages:
-            texto_completo += page.extract_text()
+            texto += page.extract_text()
         
-        # Lógica de leitura ajustada para o seu PDF 
-        # Procura por PIX RECEBIDO, Nome e Valor com centavos
-        padrao = r"PIX RECEBIDO\n(.*?)\n.*?\n([\d\.,]+)\sC"
-        matches = re.findall(padrao, texto_completo)
+        # Expressão regular para capturar PIX RECEBIDO 
+        # Ela procura o texto, pula o nome e o CPF até achar o valor "XX,XX C"
+        pattern = r"PIX RECEBIDO\n(.*?)\n.*?\n\n\n([\d\.,]+)\sC"
+        matches = re.findall(pattern, texto)
         
         if matches:
-            count = 0
-            for nome_pdf, valor_str in matches:
+            for nome_extrato, valor_str in matches:
                 # Converte "60,06" em 60.06
-                valor_f = float(valor_str.replace('.', '').replace(',', '.'))
-                # Extrai centavos para o ID (ex: 0.06 -> "06") 
-                centavos = int(round((valor_f - int(valor_f)) * 100))
-                id_pix = str(centavos).zfill(2)
+                v_total = float(valor_str.replace('.', '').replace(',', '.'))
+                # Extrai os centavos como ID
+                centavos = int(round((v_total - int(v_total)) * 100))
+                id_id = str(centavos).zfill(2)
                 
-                if id_pix in df_membros['ID'].values:
-                    idx = df_membros.index[df_membros['ID'] == id_pix][0]
-                    # Soma apenas o valor inteiro (R$ 60,00) conforme sua regra
-                    df_membros.at[idx, 'Saldo'] += int(valor_f)
-                    st.success(f"✅ Identificado: {nome_pdf} (ID {id_pix}) - R$ {int(valor_f)}")
-                    count += 1
+                if id_id in df['ID'].values:
+                    idx = df.index[df['ID'] == id_id][0]
+                    df.at[idx, 'Saldo'] += int(v_total)
+                    st.success(f"Creditado R$ {int(v_total)} para {df.at[idx, 'Nome']} (ID {id_id})")
             
-            if count > 0:
-                df_membros.to_csv(ARQUIVO_DADOS, index=False)
-                st.info(f"{count} pagamentos processados com sucesso!")
+            df.to_csv(ARQUIVO, index=False)
+            st.rerun()
         else:
-            st.warning("Nenhum PIX RECEBIDO encontrado com o padrão de centavos.")
+            st.warning("Nenhum pagamento identificado. Verifique se o PDF é o extrato correto da CAIXA.")
 
-# Exibição da Tabela
+# --- TABELA DE MEMBROS ---
 st.subheader("Lista de Membros")
-df_final = st.data_editor(df_membros, use_container_width=True, num_rows="dynamic")
+df_edit = st.data_editor(df, use_container_width=True, num_rows="dynamic")
 
-if st.button("Salvar Alterações Manuais"):
-    df_final.to_csv(ARQUIVO_DADOS, index=False)
+if st.button("Salvar Alterações"):
+    df_edit.to_csv(ARQUIVO, index=False)
     st.success("Dados salvos!")
