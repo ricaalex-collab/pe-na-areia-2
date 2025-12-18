@@ -4,95 +4,88 @@ from streamlit_gsheets import GSheetsConnection
 from pypdf import PdfReader
 import re
 
-# Configurações iniciais
+# Configuração da página
 st.set_page_config(page_title="Painel do Administrador", layout="wide")
-SENHA_ACESSO = "suasenha123" # Altere para a senha que desejar
 
-# Conexão com Google Sheets
+# LOGIN SIMPLES
+if 'autenticado' not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    senha = st.text_input("Digite a senha do painel:", type="password")
+    if st.button("Entrar"):
+        if senha == "SUA_SENHA_AQUI": # Defina sua senha aqui
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+    st.stop()
+
+# CONEXÃO COM GOOGLE SHEETS
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-def realizar_login():
-    if 'autenticado' not in st.session_state:
-        st.session_state.autenticado = False
-    
-    if not st.session_state.autenticado:
-        st.title("Acesso Restrito")
-        senha = st.text_input("Digite a senha do painel:", type="password")
-        if st.button("Entrar"):
-            if senha == SENHA_ACESSO:
-                st.session_state.autenticado = True
-                st.rerun()
-            else:
-                st.error("Senha incorreta.")
-        return False
-    return True
-
-def processar_extrato(pdf_file, df_membros):
-    reader = PdfReader(pdf_file)
+def processar_pdf_caixa(file):
+    reader = PdfReader(file)
     texto = ""
     for page in reader.pages:
         texto += page.extract_text()
-
-    # Procura por padrões de "PIX RECEBIDO" e o valor
-    # Exemplo no seu PDF: "PIX RECEBIDO", "Nome", "Valor C"
-    padrao = r"PIX RECEBIDO\n(.*?)\n.*?\n([\d\.,]+)\sC"
+    
+    # Busca padrão: Nome do Favorecido seguido de Valor com "C" (Crédito)
+    # Ex: Alexandre Leoni Gu ... 60,06 C
+    padrao = r"(.*?)\n[\d\.\*]*\n\n\n([\d\.,]+)\sC"
     matches = re.findall(padrao, texto)
     
-    atualizacoes = []
-    for nome_extrato, valor_str in matches:
-        valor_cheio = float(valor_str.replace('.', '').replace(',', '.'))
-        inteiro = int(valor_cheio)
-        centavos = round((valor_cheio - inteiro) * 100)
-        id_encontrado = str(centavos).zfill(2)
-        
-        atualizacoes.append({
-            "Nome": nome_extrato.strip(),
-            "Valor": inteiro,
-            "ID_Identificado": id_encontrado
-        })
-    return atualizacoes
+    resultados = []
+    for nome, valor_str in matches:
+        if "PIX RECEBIDO" in texto: # Garante que estamos pegando entradas
+            valor_limpo = valor_str.replace('.', '').replace(',', '.')
+            valor_float = float(valor_limpo)
+            
+            # Pega apenas os centavos como ID
+            centavos = int(round((valor_float - int(valor_float)) * 100))
+            id_id = str(centavos).zfill(2)
+            
+            resultados.append({
+                "Nome": nome.strip(),
+                "Valor_Total": valor_float,
+                "Valor_Base": int(valor_float),
+                "ID_Identificado": id_id
+            })
+    return resultados
 
-if realizar_login():
-    st.title("📊 Painel do Administrador")
-    
-    # Carregar dados da planilha
-    try:
-        df_membros = conn.read(worksheet="Membros")
-    except:
-        st.error("Erro ao conectar com a planilha. Verifique os Secrets.")
-        st.stop()
+# INTERFACE
+st.title("📊 Gestão de Pagamentos - Penaareia")
 
-    # Cards de Resumo
-    col1, col2 = st.columns(2)
-    saldo_total = df_membros['Saldo'].sum()
-    col1.metric("Saldo Acumulado dos Membros", f"R$ {saldo_total:.2f}")
-    
-    # Área de Upload
-    st.divider()
-    st.subheader("Atualizar Pagamentos via Extrato")
-    arquivo_pdf = st.file_uploader("Arraste o PDF do extrato da CAIXA aqui", type="pdf")
-    
-    if arquivo_pdf:
-        if st.button("Processar Extrato e Atualizar Saldos"):
-            resultados = processar_extrato(arquivo_pdf, df_membros)
-            if resultados:
-                for item in resultados:
-                    # Lógica para somar o valor ao saldo do ID correspondente
-                    id_id = item['ID_Identificado']
-                    valor_pago = item['Valor']
-                    
-                    if id_id in df_membros['ID'].values:
-                        idx = df_membros.index[df_membros['ID'] == id_id][0]
-                        df_membros.at[idx, 'Saldo'] += valor_pago
-                        st.success(f"Confirmado: {item['Nome']} (ID {id_id}) pagou R$ {valor_pago:.2f}")
-                
-                # Salvar de volta na planilha
-                conn.update(worksheet="Membros", data=df_membros)
-                st.balloons()
-            else:
-                st.warning("Nenhum pagamento PIX novo identificado no padrão de centavos.")
+# Lendo dados da aba "Membros"
+df_membros = conn.read(worksheet="Membros")
 
-    # Tabela de Visualização
-    st.divider()
-    st.subheader("Lista de Membros")
-    st.dataframe(df_membros, use_container_width=True)
+# Exibição do Saldo Total
+saldo_total = df_membros['Saldo'].sum()
+st.metric("Saldo Total em Conta", f"R$ {saldo_total:,.2f}")
+
+# UPLOAD E PROCESSAMENTO
+st.subheader("Upload de Extrato (PDF CAIXA)")
+arquivo = st.file_uploader("Selecione o arquivo", type="pdf")
+
+if arquivo and st.button("Processar Pagamentos"):
+    pagamentos = processar_pdf_caixa(arquivo)
+    
+    for p in pagamentos:
+        id_pg = p['ID_Identificado']
+        if id_pg in df_membros['ID'].astype(str).values:
+            idx = df_membros.index[df_membros['ID'].astype(str) == id_pg][0]
+            nome_membro = df_membros.at[idx, 'Nome']
+            
+            # Atualiza Saldo
+            df_membros.at[idx, 'Saldo'] += p['Valor_Base']
+            st.success(f"✅ Pagamento identificado: {nome_membro} (ID {id_pg}) - R$ {p['Valor_Base']}")
+        else:
+            st.warning(f"⚠️ ID {id_pg} encontrado no extrato mas não cadastrado na planilha.")
+
+    # SALVAR NA PLANILHA
+    conn.update(worksheet="Membros", data=df_membros)
+    st.info("Planilha atualizada com sucesso!")
+
+st.divider()
+st.subheader("Lista de Membros")
+st.dataframe(df_membros, use_container_width=True)
